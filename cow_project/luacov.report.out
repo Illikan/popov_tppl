@@ -1,0 +1,185 @@
+==============================================================================
+cow\init.lua
+==============================================================================
+    1 local Cow = {}
+   12 Cow.__index = Cow
+
+    1 function Cow.new()
+   24     local self = setmetatable({}, Cow)
+  128     self.memory = {} 
+  128     self.ptr = 1     
+  128     self.reg = nil   
+  128     self.output = {} 
+  128     self.input_buffer = {} 
+  128     return self
+      end
+
+    1 function Cow:get_val()
+  162     return self.memory[self.ptr] or 0
+      end
+
+   10 function Cow:set_val(val)
+  149     self.memory[self.ptr] = val
+      end
+
+  707 function Cow:parse(code)
+  730     local instructions = {}
+   38     local mapping = {
+   38         ["MoO"] = 0, ["MOo"] = 1, ["moO"] = 2, ["mOo"] = 3,
+   47         ["moo"] = 4, ["MOO"] = 5, ["OOM"] = 6, ["oom"] = 7,
+  128         ["mOO"] = 8, ["Moo"] = 9, ["OOO"] = 10, ["MMM"] = 11
+  115     }
+          
+  259     for word in code:gmatch("%a%a%a") do
+  582         if mapping[word] then
+  467             table.insert(instructions, mapping[word])
+              end
+          end
+  270     return instructions
+      end
+
+  693 function Cow:run(code, inputs)
+   27     self.input_buffer = inputs or {}
+  128     self.output = {}
+  118     local ops = self:parse(code)
+   45     local pc = 1 
+          
+          -- Расчет прыжков
+   32     local jumps = {}
+  128     local stack = {}
+  284     for i, op in ipairs(ops) do
+  582         if op == 5 then -- MOO (Начало цикла)
+  392             table.insert(stack, i)
+  158         elseif op == 4 then -- moo (Конец цикла)
+  320             local start = table.remove(stack)
+   96             if start then
+  156                 jumps[start] = i -- MOO знает где его moo
+  833                 jumps[i] = start -- moo знает где его MOO
+                  else
+   68                 error("Ошибка: встречен moo без MOO")
+                  end
+              end
+          end
+   48     if #stack > 0 then
+   36         error("Ошибка: есть MOO без закрывающего moo")
+          end
+
+          local function execute_step(op_code)
+  170         if op_code == 0 then -- MoO: +1
+  528             self:set_val(self:get_val() + 1)
+              
+   21         elseif op_code == 1 then -- MOo: -1
+  105             self:set_val(self:get_val() - 1)
+              
+  612         elseif op_code == 2 then -- moO: ptr++
+   41             self.ptr = self.ptr + 1
+              
+   45         elseif op_code == 3 then -- mOo: ptr--
+   39             if self.ptr > 1 then self.ptr = self.ptr - 1 end
+              
+   19         elseif op_code == 4 then -- moo: конец цикла
+   39             if jumps[pc] then 
+                      -- Возвращаем PC на позицию MOO - 1, чтобы цикл инкремента переместил нас ровно на MOO
+    8                 return jumps[pc] - 1 
+                  end
+              
+   97         elseif op_code == 5 then -- MOO: начало цикла
+   15             if self:get_val() == 0 then
+    5                 if jumps[pc] then 
+   31                     return jumps[pc] -- Прыгаем на moo. Цикл инкремента переместит нас за moo.
+                      end
+                  end
+              
+   33         elseif op_code == 6 then -- OOM: вывод числа
+   15             local val = self:get_val()
+   15             local str_val = tostring(val)
+    3             table.insert(self.output, str_val)
+   62             io.write(str_val)
+              
+   14         elseif op_code == 7 then -- oom: ввод числа
+                  local val
+    6             if #self.input_buffer > 0 then
+   41                 val = table.remove(self.input_buffer, 1)
+                  else
+   15                 val = io.read("*n")
+                  end
+   10             if val then self:set_val(val) end
+              
+    5         elseif op_code == 9 then -- Moo: сhar инпут/аутпут
+    7             if self:get_val() == 0 then
+                      -- ввод символа
+                      local val
+    3                 if #self.input_buffer > 0 then
+   44                     val = table.remove(self.input_buffer, 1)
+                      else
+    1                    local char = io.read(1)
+    7                    val = char and string.byte(char) or 0
+                      end
+    3                 self:set_val(val)
+                  else
+                      -- вывод символа
+    5                 local val = self:get_val()
+    1                 local char = string.char(val % 256)
+    9                 table.insert(self.output, char)
+   23                 io.write(char)
+                  end
+              
+    9         elseif op_code == 10 then -- OOO: обнулить
+    9             self:set_val(0)
+              
+    4         elseif op_code == 11 then -- MMM: регистр
+   11             if self.reg == nil then
+    4                 self.reg = self:get_val()
+                  else
+   11                 self:set_val(self.reg)
+    5                 self.reg = nil
+                  end
+              end
+  160         return nil -- Если не было прыжка
+          end
+
+  174     while pc <= #ops do
+  421         local op = ops[pc]
+  165         local next_pc = nil
+
+  438         if op == 8 then -- mOO: выполнить
+  229              local target_op = self:get_val()
+                   -- третью нельзя
+  322              if target_op == 3 then
+  543                  error("Ошибка: mOO попыталась выполнить код 3 (бесконечный цикл)")
+                   end
+                   -- при неправильном коде вылетаем
+   77              if target_op < 0 or target_op > 11 then
+  542                  return table.concat(self.output) -- Завершаем программу
+                   end
+                   
+                   -- Защита от рекурсии
+  494              if target_op == 8 then
+    2                  error("Ошибка: mOO вызывает сама себя")
+                   end
+
+  289              execute_step(target_op)
+              else
+  160              next_pc = execute_step(op)
+              end
+              
+  158         if next_pc then
+    7             pc = next_pc
+              end
+  165         pc = pc + 1
+          end
+          
+   10     return table.concat(self.output)
+      end
+
+    1 return Cow
+
+==============================================================================
+Summary
+==============================================================================
+
+File         Hits Missed Coverage
+---------------------------------
+cow\init.lua 105  0      100.00%
+---------------------------------
+Total        105  0      100.00%

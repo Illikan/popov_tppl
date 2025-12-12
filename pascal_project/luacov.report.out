@@ -1,0 +1,237 @@
+==============================================================================
+pascal\init.lua
+==============================================================================
+     -- pascal/init.lua
+   2 local Pascal = {}
+   2 Pascal.__index = Pascal
+
+     -- Типы токенов
+   2 local TokenType = {
+   2     INTEGER = "INTEGER",
+   2     PLUS = "PLUS", MINUS = "MINUS", MUL = "MUL", DIV = "DIV",
+   2     LPAREN = "LPAREN", RPAREN = "RPAREN",
+   2     BEGIN = "BEGIN", END = "END",
+   2     ID = "ID", ASSIGN = "ASSIGN",
+   2     SEMI = "SEMI", DOT = "DOT",
+   2     EOF = "EOF"
+     }
+
+   2 function Pascal.new()
+  14     local self = setmetatable({}, Pascal)
+  14     self.text = ""
+  14     self.pos = 1
+  14     self.current_token = nil
+  14     self.variables = {} -- Словарь переменных (результат работы)
+  14     return self
+     end
+
+     -- === ЛЕКСЕР (Разбиение на токены) ===
+
+   2 function Pascal:error(msg)
+   4     error("Pascal Error: " .. msg)
+     end
+
+   2 function Pascal:get_next_token()
+ 247     local text = self.text
+         
+         -- Пропускаем пробелы
+ 964     while self.pos <= #text and text:sub(self.pos, self.pos):match("%s") do
+ 717         self.pos = self.pos + 1
+         end
+
+ 247     if self.pos > #text then
+  10         return { type = TokenType.EOF, value = nil }
+         end
+
+ 237     local char = text:sub(self.pos, self.pos)
+
+         -- Числа (INTEGER)
+ 237     if char:match("%d") then
+  46         local num_str = text:match("^%d+", self.pos)
+  46         self.pos = self.pos + #num_str
+  46         return { type = TokenType.INTEGER, value = tonumber(num_str) }
+         end
+
+         -- Идентификаторы (ID) и Ключевые слова (BEGIN, END)
+ 191     if char:match("[%a_]") then
+  73         local word = text:match("^[%a_][%w_]*", self.pos)
+  73         self.pos = self.pos + #word
+  73         local upper_word = word:upper()
+  73         if upper_word == "BEGIN" then return { type = TokenType.BEGIN, value = "BEGIN" }
+  57         elseif upper_word == "END" then return { type = TokenType.END, value = "END" }
+  45         elseif upper_word == "DIV" then return { type = TokenType.DIV, value = "/" } -- Pascal div style
+  45         else return { type = TokenType.ID, value = word } -- Имя переменной чувствительно к регистру? Обычно в Паскале нет, но сделаем как есть.
+             end
+         end
+
+         -- Оператор присваивания (:=)
+ 118     if char == ":" and text:sub(self.pos+1, self.pos+1) == "=" then
+  30         self.pos = self.pos + 2
+  30         return { type = TokenType.ASSIGN, value = ":=" }
+         end
+
+         -- Одиночные символы
+  88     self.pos = self.pos + 1
+  88     if char == "+" then return { type = TokenType.PLUS, value = "+" }
+  67     elseif char == "-" then return { type = TokenType.MINUS, value = "-" }
+  61     elseif char == "*" then return { type = TokenType.MUL, value = "*" }
+  54     elseif char == "/" then return { type = TokenType.DIV, value = "/" }
+  50     elseif char == "(" then return { type = TokenType.LPAREN, value = "(" }
+  42     elseif char == ")" then return { type = TokenType.RPAREN, value = ")" }
+  33     elseif char == ";" then return { type = TokenType.SEMI, value = ";" }
+  11     elseif char == "." then return { type = TokenType.DOT, value = "." }
+         end
+
+   1     self:error("Unexpected character: " .. char)
+     end
+
+   2 function Pascal:eat(token_type)
+ 234     if self.current_token.type == token_type then
+ 233         self.current_token = self:get_next_token()
+         else
+   1         self:error("Expected " .. token_type .. ", got " .. self.current_token.type)
+         end
+     end
+
+     -- === ПАРСЕР И ИНТЕРПРЕТАТОР ===
+
+     -- factor : PLUS factor | MINUS factor | INTEGER | LPAREN expr RPAREN | variable
+   2 function Pascal:factor()
+  74     local token = self.current_token
+         
+  74     if token.type == TokenType.PLUS then
+   2         self:eat(TokenType.PLUS)
+   2         return self:factor()
+  72     elseif token.type == TokenType.MINUS then
+   2         self:eat(TokenType.MINUS)
+   2         return -self:factor()
+  70     elseif token.type == TokenType.INTEGER then
+  46         self:eat(TokenType.INTEGER)
+  45         return token.value
+  24     elseif token.type == TokenType.LPAREN then
+   8         self:eat(TokenType.LPAREN)
+   8         local result = self:expr()
+   8         self:eat(TokenType.RPAREN)
+   8         return result
+  16     elseif token.type == TokenType.ID then
+  15         return self:variable()
+         else
+   1         self:error("Unexpected token in factor: " .. token.type)
+         end
+     end
+
+     -- term : factor ((MUL | DIV) factor)*
+   2 function Pascal:term()
+  60     local result = self:factor()
+
+  67     while self.current_token.type == TokenType.MUL or self.current_token.type == TokenType.DIV do
+  10         local token = self.current_token
+  10         if token.type == TokenType.MUL then
+   6             self:eat(TokenType.MUL)
+   6             result = result * self:factor()
+   4         elseif token.type == TokenType.DIV then
+   4             self:eat(TokenType.DIV)
+   4             result = result / self:factor()
+             end
+         end
+  57     return result
+     end
+
+     -- expr : term ((PLUS | MINUS) term)*
+   2 function Pascal:expr()
+  38     local result = self:term()
+
+  57     while self.current_token.type == TokenType.PLUS or self.current_token.type == TokenType.MINUS do
+  22         local token = self.current_token
+  22         if token.type == TokenType.PLUS then
+  18             self:eat(TokenType.PLUS)
+  18             result = result + self:term()
+   4         elseif token.type == TokenType.MINUS then
+   4             self:eat(TokenType.MINUS)
+   4             result = result - self:term()
+             end
+         end
+  35     return result
+     end
+
+     -- variable : ID
+   2 function Pascal:variable()
+  15     local var_name = self.current_token.value
+  15     self:eat(TokenType.ID)
+         -- Если переменная еще не определена, выкидываем ошибку или возвращаем nil?
+         -- В упрощенном Паскале часто инициализируют нулем или падают.
+  15     local val = self.variables[var_name]
+  15     if val == nil then
+   1         self:error("Variable not found: " .. var_name)
+         end
+  14     return val
+     end
+
+     -- assignment : variable ASSIGN expr
+   2 function Pascal:assignment()
+         -- В грамматике variable стоит слева. Но variable() у нас возвращает значение.
+         -- Нам нужно имя переменной.
+  30     local var_name = self.current_token.value
+  30     self:eat(TokenType.ID)
+  30     self:eat(TokenType.ASSIGN)
+  30     local result = self:expr()
+  27     self.variables[var_name] = result
+     end
+
+     -- statement : compound_statement | assignment | empty
+   2 function Pascal:statement()
+  38     local token = self.current_token
+  38     if token.type == TokenType.BEGIN then
+   2         self:compound_statement()
+  36     elseif token.type == TokenType.ID then
+  30         self:assignment()
+         else
+             -- empty statement, ничего не делаем
+         end
+     end
+
+     -- statement_list : statement | statement SEMI statement_list
+   2 function Pascal:statement_list()
+  16     self:statement()
+  35     while self.current_token.type == TokenType.SEMI do
+  22         self:eat(TokenType.SEMI)
+  22         self:statement()
+         end
+     end
+
+     -- compound_statement (complex_statement) : BEGIN statement_list END
+   2 function Pascal:compound_statement()
+  16     self:eat(TokenType.BEGIN)
+  16     self:statement_list()
+  13     self:eat(TokenType.END)
+     end
+
+     -- program : complex_statement DOT
+   2 function Pascal:program()
+  14     self:compound_statement()
+  10     self:eat(TokenType.DOT)
+     end
+
+     -- Точка входа
+   2 function Pascal:run(code)
+  14     self.text = code
+  14     self.pos = 1
+  14     self.variables = {}
+  14     self.current_token = self:get_next_token()
+         
+  14     self:program()
+         
+  10     return self.variables
+     end
+
+   2 return Pascal
+
+==============================================================================
+Summary
+==============================================================================
+
+File            Hits Missed Coverage
+------------------------------------
+pascal\init.lua 135  0      100.00%
+------------------------------------
+Total           135  0      100.00%

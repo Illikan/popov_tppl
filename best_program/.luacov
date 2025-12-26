@@ -1,0 +1,13 @@
+return {
+  modules = {
+    ["src.client"] = "src/client.lua",
+    ["src.parser"] = "src/parser.lua"
+  },
+  exclude = {
+    "spec",
+    "socket",
+    "mime",
+    "ltn12",
+    "main.lua" -- main.lua тестируется ручным запуском, автотестами его сложно покрыть
+  }
+}

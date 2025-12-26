@@ -1,0 +1,194 @@
+==============================================================================
+src\client.lua
+==============================================================================
+   7 local socket = require("socket")
+   2 local Client = {}
+   2 Client.__index = Client
+
+   2 function Client.new(host, port, packet_size)
+  12     local self = setmetatable({}, Client)
+  12     self.host = host
+  12     self.port = port
+  12     self.packet_size = packet_size
+  12     self.sock = nil
+  12     self.state = "DISCONNECTED" 
+  12     self.buffer = ""
+  12     self.name = (port == 5123) and "S1" or "S2" -- Имя для логов
+  12     return self
+     end
+
+   2 function Client:log(msg)
+   6     print(string.format("[%s] %s", self.name, msg))
+     end
+
+   2 function Client:connect()
+   2     self.sock = socket.tcp()
+   2     self.sock:settimeout(0) -- Неблокирующий режим
+   2     self.sock:connect(self.host, self.port)
+   2     self.state = "CONNECTING"
+   2     self.buffer = ""
+   2     self:log("Connecting...")
+     end
+
+   2 function Client:process()
+  13     if self.state == "DISCONNECTED" then
+   2         self:connect()
+   2         return nil
+         end
+
+         -- 1. Чтение данных из сокета
+  11     local chunk, err, partial = self.sock:receive(8192)
+         
+   6     if err == "closed" then
+   1         self:log("Connection closed by server.")
+   1         self.state = "DISCONNECTED"
+   1         return nil
+         end
+
+         -- Накапливаем буфер
+   5     if chunk then self.buffer = self.buffer .. chunk end
+   5     if partial then self.buffer = self.buffer .. partial end
+
+         -- 2. Машина состояний
+   5     if self.state == "CONNECTING" then
+             -- Проверяем, удалось ли подключиться
+   1         local _, write_err = socket.select(nil, {self.sock}, 0)
+   1         if write_err and #write_err > 0 then
+   1             self:log("Connected! Sending Auth...")
+   1             self.sock:send("isu_pt")
+   1             self.state = "WAIT_GRANTED"
+             end
+
+   4     elseif self.state == "WAIT_GRANTED" then
+             -- Ждем, пока в буфере появится "granted"
+   2         if #self.buffer > 0 then
+                 -- Ищем слово granted (сервер шлет "granted" + 0x00)
+   2             local s, e = string.find(self.buffer, "granted")
+                 
+   2             if s then
+   1                 self:log("Auth success! Sending GET...")
+                     -- Удаляем всё до конца слова granted (и нуль-терминатор, если есть)
+                     -- Обычно это 7 байт (granted) + 1 байт (00) = 8 байт
+                     -- Но чтобы наверняка, просто очистим буфер, так как данных там еще нет
+   1                 self.buffer = "" 
+                     
+   1                 self.sock:send("get")
+   1                 self.state = "STREAMING"
+                 else
+                     -- Если пришло что-то странное (не granted), покажем это
+   1                 if #self.buffer > 10 then
+   1                      self:log("Unknown handshake: " .. self.buffer)
+   1                      self.buffer = "" -- Сброс, пробуем снова
+   1                      self.sock:send("isu_pt")
+                     end
+                 end
+             end
+
+   2     elseif self.state == "STREAMING" then
+             -- Режем буфер на пакеты
+   2         if #self.buffer >= self.packet_size then
+   1             local packet = string.sub(self.buffer, 1, self.packet_size)
+   1             self.buffer = string.sub(self.buffer, self.packet_size + 1)
+                 
+                 -- ВАЖНО: Запрашиваем следующий пакет только когда получили текущий
+   1             self.sock:send("get")
+                 
+   1             return packet
+             end
+         end
+         
+   4     return nil
+     end
+
+   2 return Client
+
+==============================================================================
+src\parser.lua
+==============================================================================
+   7 local Parser = {}
+
+   7 function Parser.validate_checksum(data, packet_name)
+  35     if #data < 1 then return false end
+         
+  35     local content = data:sub(1, #data - 1)
+  35     local received_sum = string.unpack("I1", data:sub(#data))
+         
+  35     local calculated_sum = 0
+ 399     for i = 1, #content do
+ 364         calculated_sum = calculated_sum + string.byte(content, i)
+         end
+  35     calculated_sum = calculated_sum % 256
+         
+  35     if calculated_sum ~= received_sum then
+             -- Выводим байты только если ошибка
+   9         local hex = ""
+  51         for i=1, #data do hex = hex .. string.format("%02X ", string.byte(data, i)) end
+   9         print(string.format("DEBUG %s: Checksum Fail! Calc=%d, Recv=%d | Bytes: %s", packet_name, calculated_sum, received_sum, hex))
+   9         return false
+         end
+         
+  26     return true
+     end
+
+   7 function Parser.format_time(micro_ts)
+         -- Big Endian int64 time usually works directly
+  26     local seconds = math.floor(micro_ts / 1000000)
+         -- Защита от сбоев даты
+  26     if seconds < 0 or seconds > 32503680000 then -- до 3000 года
+   7         return "INVALID_DATE"
+         end
+  19     return os.date("%Y-%m-%d %H:%M:%S", seconds)
+     end
+
+     -- ВЕРНУЛИ Big Endian (>)
+   7 function Parser.parse_type1(data)
+  21     if #data ~= 15 then return nil, "Invalid length" end
+         
+  14     local valid = Parser.validate_checksum(data, "S1")
+         
+         -- !!! ДОБАВЬ ЭТУ СТРОКУ ОБЯЗАТЕЛЬНО !!!
+  14     if not valid then return nil, "Checksum error" end
+         
+  12     local ts, temp, press = string.unpack(">i8fi2", data)
+         
+  12     return {
+  12         type = "SERVER_1",
+  12         timestamp = Parser.format_time(ts),
+  12         temp = string.format("%.2f", temp),
+  11         pressure = press,
+  10         valid = valid
+  10     }
+     end
+
+   6 function Parser.parse_type2(data)
+  13     if #data ~= 21 then return nil, "Invalid length" end
+         
+   6     local valid = Parser.validate_checksum(data, "S2")
+         
+         -- !!! И ЗДЕСЬ ТОЖЕ !!!
+   7     if not valid then return nil, "Checksum error" end
+         
+   7     local ts, x, y, z = string.unpack(">i8i4i4i4", data)
+         
+   7     return {
+   7         type = "SERVER_2",
+   7         timestamp = Parser.format_time(ts),
+   7         x = x,
+   6         y = y,
+   7         z = z,
+   6         valid = valid
+   6     }
+     end
+
+   6 return Parser
+
+==============================================================================
+Summary
+==============================================================================
+
+File           Hits Missed Coverage
+-----------------------------------
+src\client.lua 59   0      100.00%
+src\parser.lua 46   0      100.00%
+-----------------------------------
+Total          105  0      100.00%
